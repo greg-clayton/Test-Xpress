@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test Xpress</title>
+<style>
+*{box-sizing:border-box;}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8f8fb;color:#1a1a2e;}
+#app input,#app select,#app textarea{font-family:inherit;font-size:13px;color:#1a1a2e;background:#fff;border:1px solid #ccc;border-radius:8px;padding:7px 10px;outline:none;}
+#app input:focus,#app select:focus,#app textarea:focus{border-color:#555;}
+#app button{font-family:inherit;font-size:13px;cursor:pointer;border:1px solid #ccc;border-radius:8px;padding:7px 13px;background:transparent;color:#1a1a2e;transition:background 0.12s;white-space:nowrap;}
+#app button:hover:not(:disabled){background:#f0f0f0;}
+#app button:active:not(:disabled){transform:scale(0.98);}
+#app button:disabled{opacity:0.4;cursor:default;}
+#app .bp{background:#1a1a2e;color:#fff;border-color:transparent;}
+#app .bp:hover:not(:disabled){opacity:0.85;}
+#app .bd{color:#e24b4a;border-color:#e24b4a;}
+#app .bd:hover:not(:disabled){background:#fff0f0;}
+#app .card{background:#fff;border:1px solid #e8e8e8;border-radius:12px;}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div id="app" style="min-height:100vh;"></div>
+<script type="module">
+import{h,render}from'https://esm.sh/preact@10.19.3';
+import{useState,useEffect,useRef,useCallback,useMemo}from'https://esm.sh/preact@10.19.3/hooks';
+import htm from'https://esm.sh/htm@3.1.1';
+const html=htm.bind(h);
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function apiLoad(){
+  const r=await fetch('/api/data');
+  if(!r.ok)throw new Error('Load failed');
+  return r.json();
+}
+async function apiSave(tests,sections,runs){
+  const r=await fetch('/api/data',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tests,sections,runs})});
+  if(!r.ok)throw new Error('Save failed');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const uid=()=>Math.random().toString(36).slice(2,9);
+function fmtDate(iso){if(!iso)return'Never';const d=new Date(iso),now=new Date(),diff=(now-d)/1000;if(diff<60)return'just now';if(diff<3600)return Math.floor(diff/60)+'m ago';if(diff<86400)return Math.floor(diff/3600)+'h ago';return d.toLocaleDateString('en-GB',{day:'numeric',month:'short'});}
+function fmtMs(ms){return ms>=1000?(ms/1000).toFixed(ms%1000===0?0:1)+'s':ms+'ms';}
+
+const STEP_TYPES=['navigate','click','type','assert','assertText','wait','scroll'];
+const TC={navigate:{bg:'#e6f1fb',tx:'#0c447c'},click:{bg:'#eaf3de',tx:'#27500a'},type:{bg:'#faeeda',tx:'#633806'},assert:{bg:'#eeedfe',tx:'#3c3489'},assertText:{bg:'#fbeaf0',tx:'#72243e'},wait:{bg:'#f1efe8',tx:'#444441'},scroll:{bg:'#e1f5ee',tx:'#085041'}};
+const SC={pass:{bg:'#eaf3de',tx:'#27500a',dot:'#639922',label:'Pass'},fail:{bg:'#fcebeb',tx:'#791f1f',dot:'#e24b4a',label:'Fail'},not_run:{bg:'#f1efe8',tx:'#444441',dot:'#888780',label:'Not run'},running:{bg:'#e6f1fb',tx:'#0c447c',dot:'#378add',label:'Running'}};
+
+function normalise(tests){return(tests||[]).map(t=>({sectionId:null,...t,steps:(t.steps||[]).map(s=>({delay:0,screenshot:null,...s}))}))}
+
+// ── Shared components ─────────────────────────────────────────────────────────
+function StatusBadge({status}){const s=status||'not_run';const c=SC[s]||SC.not_run;return html`<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;background:${c.bg};color:${c.tx};flex-shrink:0;white-space:nowrap;"><span style="width:6px;height:6px;border-radius:50%;background:${c.dot};display:inline-block;flex-shrink:0;"></span>${c.label}</span>`;}
+function TypeBadge({type}){const c=TC[type]||TC.assert;return html`<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;background:${c.bg};color:${c.tx};flex-shrink:0;">${type}</span>`;}
+
+function Lightbox({src,onClose}){
+  useEffect(()=>{const h=e=>{if(e.key==='Escape')onClose();};window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);},[]);
+  return html`<div style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:24px;" onClick=${onClose}>
+    <div style="position:relative;" onClick=${e=>e.stopPropagation()}>
+      <img src=${src} style="max-width:88vw;max-height:84vh;border-radius:8px;display:block;" />
+      <button onClick=${onClose} style="position:absolute;top:-14px;right:-14px;width:30px;height:30px;border-radius:50%;background:#1a1a2e;border:2px solid #fff;color:#fff;font-size:16px;cursor:pointer;padding:0;">&times;</button>
+    </div>
+  </div>`;}
+
+function StepRow({step,index}){
+  const[light,setLight]=useState(false);
+  const c=TC[step.type]||TC.assert;
+  return html`<div style="background:#fff;border:1px solid #e8e8e8;border-radius:8px;padding:8px 12px;display:flex;align-items:center;gap:8px;">
+    <span style="font-size:11px;color:#aaa;min-width:16px;flex-shrink:0;">${index+1}</span>
+    <${TypeBadge} type=${step.type} />
+    <code style="font-size:12px;font-family:monospace;color:#555;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${step.target}</code>
+    ${step.value&&html`<span style="font-size:11px;color:#aaa;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">"${step.value}"</span>`}
+    ${(step.delay||0)>0&&html`<span style="font-size:11px;font-weight:600;padding:2px 7px;border-radius:20px;background:#fff8e1;color:#e65100;flex-shrink:0;">${fmtMs(step.delay)}</span>`}
+    ${step.screenshot
+      ?html`<button onClick=${()=>setLight(true)} style="flex-shrink:0;padding:0;border:1px solid #e0e0e0;border-radius:5px;overflow:hidden;cursor:pointer;background:none;width:44px;height:28px;"><img src=${step.screenshot} style="width:44px;height:28px;object-fit:cover;display:block;" /></button>`
+      :html`<div style="width:44px;height:28px;background:#f5f5f5;border:1px solid #eee;border-radius:5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg width="13" height="13" viewBox="0 0 14 14" fill="none"><rect x="1" y="3" width="12" height="9" rx="1.5" stroke="#ccc" stroke-width="1.2"/><circle cx="7" cy="7.5" r="2" stroke="#ccc" stroke-width="1.2"/></svg></div>`}
+    ${light&&html`<${Lightbox} src=${step.screenshot} onClose=${()=>setLight(false)} />`}
+  </div>`;}
+
+function BuilderStepRow({step,index,isFirst,isLast,onMove,onRemove,onDelayChange}){
+  const[editDelay,setEditDelay]=useState(false);
+  const c=TC[step.type]||TC.assert;const delay=step.delay||0;
+  return html`<div style="background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:7px;">
+    <span style="font-size:11px;color:#aaa;min-width:16px;flex-shrink:0;">${index+1}</span>
+    <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;background:${c.bg};color:${c.tx};flex-shrink:0;">${step.type}</span>
+    <code style="font-size:12px;font-family:monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${step.target}</code>
+    ${step.value&&html`<span style="font-size:11px;color:#aaa;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">"${step.value}"</span>`}
+    ${editDelay
+      ?html`<div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
+          <input type="number" min="0" step="100" value=${delay} onInput=${e=>onDelayChange(step.id,Math.max(0,parseInt(e.target.value)||0))} onBlur=${()=>setEditDelay(false)} onKeyDown=${e=>{if(e.key==='Enter'||e.key==='Escape')setEditDelay(false);}} style="width:72px;padding:3px 6px;font-size:12px;text-align:right;" autofocus />
+          <span style="font-size:11px;color:#aaa;">ms</span>
+        </div>`
+      :html`<button onClick=${()=>setEditDelay(true)} style="flex-shrink:0;padding:2px 7px;font-size:11px;border-radius:20px;cursor:pointer;background:${delay>0?'#fff8e1':'#f5f5f5'};color:${delay>0?'#e65100':'#aaa'};border:1px solid ${delay>0?'#ffe0a0':'#e0e0e0'};font-weight:${delay>0?'600':'400'};">${delay>0?fmtMs(delay):'+ delay'}</button>`}
+    ${step.screenshot&&html`<div style="flex-shrink:0;width:36px;height:24px;border-radius:4px;overflow:hidden;border:1px solid #e0e0e0;"><img src=${step.screenshot} style="width:36px;height:24px;object-fit:cover;display:block;" /></div>`}
+    <button style="padding:3px 6px;font-size:11px;flex-shrink:0;" onClick=${()=>onMove(index,-1)} disabled=${isFirst}>↑</button>
+    <button style="padding:3px 6px;font-size:11px;flex-shrink:0;" onClick=${()=>onMove(index,1)} disabled=${isLast}>↓</button>
+    <button class="bd" style="padding:3px 7px;font-size:11px;flex-shrink:0;" onClick=${()=>onRemove(step.id)}>✕</button>
+  </div>`;}
+
+// ── Login ─────────────────────────────────────────────────────────────────────
+function LoginView({onLogin}){
+  const[name,setName]=useState('');
+  const sub=()=>{if(name.trim())onLogin(name.trim());};
+  return html`<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:40px 20px;">
+    <div style="width:100%;max-width:360px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <div style="width:38px;height:38px;background:#1a1a2e;border-radius:10px;display:flex;align-items:center;justify-content:center;"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-8" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <span style="font-size:24px;font-weight:700;">Test Xpress</span>
+      </div>
+      <p style="font-size:13px;color:#666;margin-bottom:28px;">Browser test automation platform</p>
+      <div class="card" style="padding:28px;">
+        <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:6px;">Your name</label>
+        <input style="width:100%;margin-bottom:16px;" placeholder="e.g. Greg" value=${name} onInput=${e=>setName(e.target.value)} onKeyDown=${e=>e.key==='Enter'&&sub()} autofocus />
+        <button class="bp" style="width:100%;padding:10px;" onClick=${sub} disabled=${!name.trim()}>Continue</button>
+      </div>
+    </div>
+  </div>`;}
+
+// ── Top nav ───────────────────────────────────────────────────────────────────
+function TopNav({user,view,onView,onLogout,saveStatus}){
+  const c=saveStatus==='saved'?'#3b6d11':saveStatus==='error'?'#e24b4a':'#888';
+  const l=saveStatus==='saving'?'Saving…':saveStatus==='saved'?'Saved':saveStatus==='error'?'Save failed':'';
+  return html`<div style="border-bottom:1px solid #e8e8e8;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:52px;background:#fff;position:sticky;top:0;z-index:20;">
+    <div style="display:flex;align-items:center;gap:20px;">
+      <div style="display:flex;align-items:center;gap:8px;cursor:pointer;" onClick=${()=>onView('repository')}>
+        <div style="width:26px;height:26px;background:#1a1a2e;border-radius:6px;display:flex;align-items:center;justify-content:center;"><svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M3 7l3 3 6-6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <span style="font-size:14px;font-weight:700;">Test Xpress</span>
+      </div>
+      <div style="display:flex;gap:2px;">
+        ${[['repository','Repository'],['runs','Test Runs'],['recorder','Recorder']].map(([v,lb])=>html`
+          <button style="padding:5px 14px;background:${view===v?'#f0f0f0':'transparent'};font-weight:${view===v?'600':'400'};border-color:transparent;color:${view===v?'#1a1a2e':'#666'};" onClick=${()=>onView(v)}>${lb}</button>`)}
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      ${l&&html`<span style="font-size:12px;color:${c};">${l}</span>`}
+      <div style="width:28px;height:28px;border-radius:50%;background:#f0f0f0;border:1px solid #e0e0e0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;">${user[0].toUpperCase()}</div>
+      <span style="font-size:13px;color:#666;">${user}</span>
+      <button style="font-size:12px;padding:4px 10px;color:#888;border-color:#e0e0e0;" onClick=${onLogout}>Sign out</button>
+    </div>
+  </div>`;}
+
+// ── Repository ────────────────────────────────────────────────────────────────
+function RepoTestRow({test,sections,isMoving,onView,onEdit,onMoveStart,onMove,onMoveCancel}){
+  const thumb=test.steps&&test.steps.find(s=>s.screenshot);
+  return html`<div style="background:#fafafa;border:1px solid #f0f0f0;border-radius:8px;padding:10px 12px;display:flex;align-items:center;gap:10px;">
+    <div style="width:36px;height:24px;flex-shrink:0;border-radius:4px;overflow:hidden;border:1px solid #e0e0e0;cursor:pointer;background:#eee;display:flex;align-items:center;justify-content:center;" onClick=${onView}>
+      ${thumb?html`<img src=${thumb.screenshot} style="width:36px;height:24px;object-fit:cover;display:block;" />`
+        :html`<svg width="12" height="12" viewBox="0 0 14 14" fill="none"><rect x="1" y="3" width="12" height="9" rx="1.5" stroke="#bbb" stroke-width="1.2"/><circle cx="7" cy="7.5" r="2" stroke="#bbb" stroke-width="1.2"/></svg>`}
+    </div>
+    <div style="flex:1;min-width:0;cursor:pointer;" onClick=${onView}>
+      <p style="font-size:13px;font-weight:600;margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${test.name}</p>
+      <p style="font-size:11px;color:#888;">${test.steps.length} step${test.steps.length!==1?'s':''} · ${fmtDate(test.lastRunAt)}</p>
+    </div>
+    <${StatusBadge} status=${test.lastRunStatus||'not_run'} />
+    ${isMoving
+      ?html`<div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <select style="font-size:12px;padding:4px 8px;" onChange=${e=>onMove(e.target.value)}>
+            <option value="">Uncategorised</option>
+            ${sections.map(s=>html`<option value=${s.id}>${s.name}</option>`)}
+          </select>
+          <button style="font-size:12px;padding:3px 8px;" onClick=${onMoveCancel}>Cancel</button>
+        </div>`
+      :html`<div style="display:flex;gap:5px;flex-shrink:0;">
+          <button style="font-size:12px;padding:4px 9px;border-color:#e0e0e0;color:#666;" onClick=${onMoveStart}>Move</button>
+          <button style="font-size:12px;padding:4px 9px;border-color:#e0e0e0;color:#666;" onClick=${onEdit}>Edit</button>
+        </div>`}
+  </div>`;}
+
+function SectionCard({section,tests,allSections,isUncategorised,movingTestId,onToggle,onRename,onDelete,onView,onEdit,onMoveStart,onMove,onMoveCancel}){
+  const[confirmDel,setConfirmDel]=useState(false);
+  const[editing,setEditing]=useState(false);
+  const[editName,setEditName]=useState(section.name);
+  if(isUncategorised&&tests.length===0)return null;
+  const collapsed=section.collapsed;
+  const doRename=()=>{if(editName.trim()){onRename(editName.trim());setEditing(false);}};
+  return html`<div class="card" style="overflow:hidden;">
+    <div style="padding:13px 16px;display:flex;align-items:center;gap:10px;background:${isUncategorised?'#fafafa':'#fff'};border-bottom:${collapsed?'none':'1px solid #f0f0f0'};">
+      <button onClick=${onToggle} style="background:none;border:none;padding:2px 4px;font-size:11px;color:#aaa;cursor:pointer;flex-shrink:0;">${collapsed?'▶':'▼'}</button>
+      ${editing
+        ?html`<input style="flex:1;font-weight:600;font-size:14px;padding:3px 8px;" value=${editName} onInput=${e=>setEditName(e.target.value)} onKeyDown=${e=>{if(e.key==='Enter')doRename();if(e.key==='Escape')setEditing(false);}} autofocus />`
+        :html`<span style="flex:1;font-size:14px;font-weight:600;color:${isUncategorised?'#888':'#1a1a2e'};">${section.name}</span>`}
+      <span style="font-size:12px;color:#aaa;flex-shrink:0;">${tests.length} test${tests.length!==1?'s':''}</span>
+      ${!isUncategorised&&!confirmDel&&!editing&&html`<div style="display:flex;gap:4px;">
+        <button style="font-size:12px;padding:3px 9px;border-color:#e0e0e0;color:#666;" onClick=${()=>{setEditing(true);setEditName(section.name);}}>Rename</button>
+        <button style="font-size:12px;padding:3px 9px;border-color:#e0e0e0;color:#e24b4a;" onClick=${()=>setConfirmDel(true)}>Delete</button>
+      </div>`}
+      ${editing&&html`<div style="display:flex;gap:4px;">
+        <button class="bp" style="font-size:12px;padding:3px 10px;" onClick=${doRename}>Save</button>
+        <button style="font-size:12px;padding:3px 9px;" onClick=${()=>setEditing(false)}>Cancel</button>
+      </div>`}
+      ${confirmDel&&html`<div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+        <span style="font-size:12px;color:#888;">Tests move to Uncategorised.</span>
+        <button class="bd" style="font-size:12px;padding:3px 9px;" onClick=${()=>{onDelete();setConfirmDel(false);}}>Delete</button>
+        <button style="font-size:12px;padding:3px 9px;" onClick=${()=>setConfirmDel(false)}>Cancel</button>
+      </div>`}
+    </div>
+    ${!collapsed&&html`<div style="padding:${tests.length?'10px 12px':'0'};display:flex;flex-direction:column;gap:6px;">
+      ${tests.length===0
+        ?html`<p style="font-size:13px;color:#aaa;text-align:center;padding:20px 0;">No tests in this section yet</p>`
+        :tests.map(t=>html`<${RepoTestRow} key=${t.id} test=${t} sections=${allSections}
+            isMoving=${movingTestId===t.id}
+            onView=${()=>onView(t.id)} onEdit=${()=>onEdit(t.id)}
+            onMoveStart=${()=>onMoveStart(t.id)} onMove=${sid=>onMove(t.id,sid)} onMoveCancel=${onMoveCancel} />`)}
+    </div>`}
+  </div>`;}
+
+function RepositoryView({tests,sections,onTests,onSections,onEdit,onView,onNew}){
+  const[movingTestId,setMovingTestId]=useState(null);
+  const[addingSection,setAddingSection]=useState(false);
+  const[newSecName,setNewSecName]=useState('');
+  const sorted=useMemo(()=>[...sections].sort((a,b)=>a.order-b.order),[sections]);
+  const uncategorised=tests.filter(t=>!t.sectionId||!sections.find(s=>s.id===t.sectionId));
+  const pass=tests.filter(t=>t.lastRunStatus==='pass').length;
+  const fail=tests.filter(t=>t.lastRunStatus==='fail').length;
+  const nr=tests.filter(t=>!t.lastRunStatus||t.lastRunStatus==='not_run').length;
+  const addSection=()=>{if(!newSecName.trim())return;onSections([...sections,{id:'sec'+uid(),name:newSecName.trim(),collapsed:false,order:sections.length}]);setNewSecName('');setAddingSection(false);};
+  const deleteSection=id=>{onTests(tests.map(t=>t.sectionId===id?{...t,sectionId:null}:t));onSections(sections.filter(s=>s.id!==id));};
+  const toggleCollapse=id=>onSections(sections.map(s=>s.id===id?{...s,collapsed:!s.collapsed}:s));
+  const renameSection=(id,name)=>onSections(sections.map(s=>s.id===id?{...s,name}:s));
+  const moveTest=(testId,sectionId)=>{onTests(tests.map(t=>t.id===testId?{...t,sectionId:sectionId||null}:t));setMovingTestId(null);};
+  return html`<div style="padding:28px 24px;max-width:960px;margin:0 auto;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;">
+      <div><h1 style="font-size:20px;font-weight:700;margin-bottom:4px;">Test Repository</h1>
+        <p style="font-size:13px;color:#666;">${tests.length} test${tests.length!==1?'s':''} · ${sections.length} section${sections.length!==1?'s':''}</p></div>
+      <div style="display:flex;gap:8px;">
+        <button onClick=${()=>setAddingSection(true)}>+ New section</button>
+        <button class="bp" onClick=${onNew}>+ New test</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:24px;">
+      ${[[tests.length,'Total','#1a1a2e'],[pass,'Passing','#3b6d11'],[fail,'Failing','#e24b4a'],[nr,'Not run','#888']].map(([v,l,c])=>html`
+        <div style="background:#fff;border:1px solid #e8e8e8;border-radius:10px;padding:14px;">
+          <p style="font-size:12px;color:#666;margin-bottom:3px;">${l}</p>
+          <p style="font-size:26px;font-weight:700;color:${c};">${v}</p>
+        </div>`)}
+    </div>
+    ${addingSection&&html`<div class="card" style="padding:14px;margin-bottom:14px;display:flex;gap:10px;align-items:center;">
+      <input style="flex:1;" placeholder="Section name e.g. Checkout Flow" value=${newSecName}
+        onInput=${e=>setNewSecName(e.target.value)}
+        onKeyDown=${e=>{if(e.key==='Enter')addSection();if(e.key==='Escape'){setAddingSection(false);setNewSecName('');}}}
+        autofocus />
+      <button class="bp" onClick=${addSection} disabled=${!newSecName.trim()}>Create</button>
+      <button onClick=${()=>{setAddingSection(false);setNewSecName('');}}>Cancel</button>
+    </div>`}
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      ${sorted.map(sec=>html`<${SectionCard} key=${sec.id} section=${sec}
+          tests=${tests.filter(t=>t.sectionId===sec.id)} allSections=${sections}
+          movingTestId=${movingTestId}
+          onToggle=${()=>toggleCollapse(sec.id)} onRename=${name=>renameSection(sec.id,name)} onDelete=${()=>deleteSection(sec.id)}
+          onView=${onView} onEdit=${onEdit}
+          onMoveStart=${id=>setMovingTestId(id)} onMove=${moveTest} onMoveCancel=${()=>setMovingTestId(null)} />`)}
+      <${SectionCard} section=${{id:null,name:'Uncategorised',collapsed:false}}
+        tests=${uncategorised} allSections=${sections} isUncategorised=${true}
+        movingTestId=${movingTestId}
+        onToggle=${()=>{}} onRename=${()=>{}} onDelete=${()=>{}}
+        onView=${onView} onEdit=${onEdit}
+        onMoveStart=${id=>setMovingTestId(id)} onMove=${moveTest} onMoveCancel=${()=>setMovingTestId(null)} />
+    </div>
+  </div>`;}
+
+// ── Test Runs ─────────────────────────────────────────────────────────────────
+function RunsView({runs,onNewRun,onRunDetail}){
+  const sorted=useMemo(()=>[...runs].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)),[runs]);
+  return html`<div style="padding:28px 24px;max-width:900px;margin:0 auto;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;">
+      <div><h1 style="font-size:20px;font-weight:700;margin-bottom:4px;">Test Runs</h1>
+        <p style="font-size:13px;color:#666;">${runs.length} run${runs.length!==1?'s':''}</p></div>
+      <button class="bp" onClick=${onNewRun}>+ New run</button>
+    </div>
+    ${sorted.length===0
+      ?html`<div class="card" style="padding:60px;text-align:center;color:#aaa;">
+          <p style="font-size:15px;margin-bottom:8px;font-weight:600;">No test runs yet</p>
+          <p style="font-size:13px;">Create a run to select and execute tests together.</p>
+        </div>`
+      :html`<div style="display:flex;flex-direction:column;gap:10px;">
+        ${sorted.map(r=>{
+          const passed=Object.values(r.results||{}).filter(v=>v==='pass').length;
+          const failed=Object.values(r.results||{}).filter(v=>v==='fail').length;
+          return html`<div class="card" style="padding:18px;cursor:pointer;transition:box-shadow 0.15s;"
+              onMouseOver=${e=>e.currentTarget.style.boxShadow='0 2px 10px rgba(0,0,0,.07)'}
+              onMouseOut=${e=>e.currentTarget.style.boxShadow='none'}
+              onClick=${()=>onRunDetail(r.id)}>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+              <div style="flex:1;min-width:0;">
+                <p style="font-size:15px;font-weight:600;margin-bottom:5px;">${r.name}</p>
+                <div style="display:flex;gap:14px;flex-wrap:wrap;">
+                  <span style="font-size:12px;color:#aaa;">${r.testIds.length} test${r.testIds.length!==1?'s':''}</span>
+                  <span style="font-size:12px;color:#aaa;">by ${r.createdBy}</span>
+                  <span style="font-size:12px;color:#aaa;">${fmtDate(r.lastRunAt||r.createdAt)}</span>
+                  ${r.lastRunAt&&html`<span style="font-size:12px;color:#3b6d11;font-weight:500;">${passed} passed</span>`}
+                  ${r.lastRunAt&&failed>0&&html`<span style="font-size:12px;color:#e24b4a;font-weight:500;">${failed} failed</span>`}
+                </div>
+              </div>
+              <${StatusBadge} status=${r.status||'not_run'} />
+            </div>
+          </div>`;
+        })}
+      </div>`}
+  </div>`;}
+
+// ── New run ───────────────────────────────────────────────────────────────────
+function NewRunView({tests,sections,user,onSave,onCancel}){
+  const[name,setName]=useState('');
+  const[selected,setSelected]=useState(new Set());
+  const sorted=useMemo(()=>[...sections].sort((a,b)=>a.order-b.order),[sections]);
+  const uncategorised=tests.filter(t=>!t.sectionId||!sections.find(s=>s.id===t.sectionId));
+  const toggle=id=>setSelected(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n;});
+  const toggleSection=ids=>{const allOn=ids.every(id=>selected.has(id));setSelected(p=>{const n=new Set(p);ids.forEach(id=>allOn?n.delete(id):n.add(id));return n;});};
+  const save=()=>{if(!name.trim()||selected.size===0)return;onSave({id:'run'+uid(),name:name.trim(),createdBy:user,createdAt:new Date().toISOString(),testIds:[...selected],status:'not_run',lastRunAt:null,results:{}});};
+  function SecGroup({secName,secTests}){
+    if(secTests.length===0)return null;
+    const ids=secTests.map(t=>t.id);
+    const allOn=ids.every(id=>selected.has(id));
+    const someOn=ids.some(id=>selected.has(id))&&!allOn;
+    return html`<div style="margin-bottom:14px;">
+      <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #f0f0f0;cursor:pointer;">
+        <input type="checkbox" checked=${allOn} ref=${el=>{if(el)el.indeterminate=someOn;}} onChange=${()=>toggleSection(ids)} style="width:15px;height:15px;cursor:pointer;" />
+        <span style="font-size:13px;font-weight:600;color:#444;">${secName}</span>
+        <span style="font-size:12px;color:#aaa;">${secTests.length} test${secTests.length!==1?'s':''}</span>
+      </label>
+      <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
+        ${secTests.map(t=>html`<label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;"
+            onMouseOver=${e=>e.currentTarget.style.background='#f8f8f8'} onMouseOut=${e=>e.currentTarget.style.background='transparent'}>
+          <input type="checkbox" checked=${selected.has(t.id)} onChange=${()=>toggle(t.id)} style="width:15px;height:15px;cursor:pointer;flex-shrink:0;" />
+          <div style="flex:1;min-width:0;"><p style="font-size:13px;font-weight:500;margin-bottom:1px;">${t.name}</p><p style="font-size:11px;color:#aaa;">${t.steps.length} steps</p></div>
+          <${StatusBadge} status=${t.lastRunStatus||'not_run'} />
+        </label>`)}
+      </div>
+    </div>`;}
+  return html`<div style="padding:28px 24px;max-width:680px;margin:0 auto;">
+    <button style="font-size:13px;padding:5px 10px;margin-bottom:20px;color:#666;border-color:#e0e0e0;" onClick=${onCancel}>← Cancel</button>
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:22px;">New test run</h1>
+    <div class="card" style="padding:20px;margin-bottom:14px;">
+      <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:6px;">Run name</label>
+      <input style="width:100%;" placeholder="e.g. Sprint 13 Regression" value=${name} onInput=${e=>setName(e.target.value)} autofocus />
+    </div>
+    <div class="card" style="padding:20px;margin-bottom:20px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <p style="font-size:14px;font-weight:600;">Select tests</p>
+        <div style="display:flex;gap:8px;">
+          <button style="font-size:12px;padding:4px 10px;color:#666;border-color:#e0e0e0;" onClick=${()=>setSelected(new Set(tests.map(t=>t.id)))}>All</button>
+          <button style="font-size:12px;padding:4px 10px;color:#666;border-color:#e0e0e0;" onClick=${()=>setSelected(new Set())}>None</button>
+        </div>
+      </div>
+      ${tests.length===0?html`<p style="font-size:13px;color:#aaa;text-align:center;padding:20px;">No tests in repository yet.</p>`
+        :html`<div>
+          ${sorted.map(sec=>html`<${SecGroup} key=${sec.id} secName=${sec.name} secTests=${tests.filter(t=>t.sectionId===sec.id)} />`)}
+          ${uncategorised.length>0&&html`<${SecGroup} secName="Uncategorised" secTests=${uncategorised} />`}
+        </div>`}
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <button class="bp" style="padding:9px 22px;" onClick=${save} disabled=${!name.trim()||selected.size===0}>Create run</button>
+      <button style="color:#666;border-color:#e0e0e0;" onClick=${onCancel}>Cancel</button>
+      ${selected.size>0&&html`<span style="font-size:13px;color:#666;">${selected.size} test${selected.size!==1?'s':''} selected</span>`}
+    </div>
+  </div>`;}
+
+// ── Run detail ────────────────────────────────────────────────────────────────
+function RunDetailView({run,tests,onBack,onUpdateRun,onDeleteRun}){
+  const runTests=useMemo(()=>run.testIds.map(id=>tests.find(t=>t.id===id)).filter(Boolean),[run,tests]);
+  const[results,setResults]=useState(()=>({...run.results}));
+  const[activeId,setActiveId]=useState(null);
+  const[running,setRunning]=useState(false);
+  const[done,setDone]=useState(!!run.lastRunAt);
+  const[elapsed,setElapsed]=useState(0);
+  const[conf,setConf]=useState(false);
+  const timerRef=useRef(null);
+  const stoppedRef=useRef(false);
+  const passRef=useRef(0);
+  const execTest=useCallback((idx,cur)=>{
+    if(stoppedRef.current||idx>=runTests.length){clearInterval(timerRef.current);setRunning(false);setDone(true);setActiveId(null);const passed=Object.values(cur).filter(v=>v==='pass').length;onUpdateRun(passed===runTests.length?'pass':'fail',cur);return;}
+    const t=runTests[idx];setActiveId(t.id);
+    const delay=Math.max(600,Math.min(t.steps.reduce((a,s)=>a+(s.delay||0)+400,0),2200));
+    setTimeout(()=>{if(stoppedRef.current)return;const fail=Math.random()<0.15;if(!fail)passRef.current++;const next={...cur,[t.id]:fail?'fail':'pass'};setResults(next);execTest(idx+1,next);},delay);
+  },[runTests,onUpdateRun]);
+  const startRun=useCallback(()=>{clearInterval(timerRef.current);stoppedRef.current=false;passRef.current=0;const fresh={};runTests.forEach(t=>{fresh[t.id]='not_run';});setResults(fresh);setActiveId(null);setDone(false);setRunning(true);setElapsed(0);const t0=Date.now();timerRef.current=setInterval(()=>setElapsed(Date.now()-t0),100);execTest(0,fresh);},[runTests,execTest]);
+  useEffect(()=>()=>{clearInterval(timerRef.current);stoppedRef.current=true;},[]);
+  const passed=Object.values(results).filter(v=>v==='pass').length;
+  const failed=Object.values(results).filter(v=>v==='fail').length;
+  return html`<div style="padding:28px 24px;max-width:720px;margin:0 auto;">
+    <button style="font-size:13px;padding:5px 10px;margin-bottom:20px;color:#666;border-color:#e0e0e0;" onClick=${onBack} disabled=${running}>← Back</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+      <div><h1 style="font-size:20px;font-weight:700;margin-bottom:4px;">${run.name}</h1>
+        <p style="font-size:13px;color:#666;">${runTests.length} test${runTests.length!==1?'s':''} · by ${run.createdBy} · ${fmtDate(run.createdAt)}</p></div>
+      <${StatusBadge} status=${done?(failed>0?'fail':'pass'):(running?'running':'not_run')} />
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:24px;">
+      <button class="bp" onClick=${startRun} disabled=${running}>${running?'Running…':'▶ Run all'}</button>
+      ${running&&html`<span style="font-size:13px;color:#666;">${(elapsed/1000).toFixed(1)}s</span>`}
+      <div style="flex:1;"></div>
+      ${!running&&html`<button class="bd" style="font-size:12px;" onClick=${()=>setConf(true)}>Delete run</button>`}
+    </div>
+    ${conf&&html`<div style="background:#fff8f8;border:1px solid #fcc;border-radius:10px;padding:14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span style="font-size:13px;">Delete this run permanently?</span>
+      <div style="display:flex;gap:8px;"><button onClick=${()=>setConf(false)}>Cancel</button><button class="bd" onClick=${onDeleteRun}>Delete</button></div>
+    </div>`}
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:24px;">
+      ${runTests.map(t=>{const res=results[t.id]||'not_run';const isActive=activeId===t.id;
+        return html`<div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px;border-color:${isActive?'#aaa':'#e8e8e8'};">
+          <div style="width:20px;height:20px;flex-shrink:0;">
+            ${res==='pass'?html`<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="#639922"/><path d="M6.5 10l2.5 2.5 5-5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+            :res==='fail'?html`<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="9" fill="#e24b4a"/><path d="M7 7l6 6M13 7l-6 6" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>`
+            :isActive?html`<div style="width:20px;height:20px;border:2.5px solid #ddd;border-top-color:#1a1a2e;border-radius:50%;animation:spin 0.7s linear infinite;"></div>`
+            :html`<div style="width:20px;height:20px;border:2px solid #e0e0e0;border-radius:50%;"></div>`}
+          </div>
+          <div style="flex:1;min-width:0;"><p style="font-size:14px;font-weight:600;margin-bottom:2px;">${t.name}</p><p style="font-size:12px;color:#aaa;">${t.steps.length} steps</p></div>
+          <${StatusBadge} status=${isActive?'running':res} />
+        </div>`;})}
+    </div>
+    ${done&&html`<div style="background:${failed>0?'#fcebeb':'#eaf3de'};border-radius:10px;padding:18px;display:flex;justify-content:space-between;align-items:center;">
+      <div><p style="font-size:15px;font-weight:600;color:${failed>0?'#791f1f':'#27500a'};">${failed>0?failed+' test'+(failed!==1?'s':'')+' failed':'All tests passed'}</p>
+        <p style="font-size:12px;color:${failed>0?'#a32d2d':'#3b6d11'};margin-top:2px;">${passed} passed · ${failed} failed · ${(elapsed/1000).toFixed(1)}s</p></div>
+      <button onClick=${startRun}>Run again</button>
+    </div>`}
+  </div>`;}
+
+// ── Test detail ───────────────────────────────────────────────────────────────
+function TestDetailView({test,sections,onBack,onEdit,onDelete}){
+  const[conf,setConf]=useState(false);
+  const sec=sections.find(s=>s.id===test.sectionId);
+  return html`<div style="padding:28px 24px;max-width:720px;margin:0 auto;">
+    <button style="font-size:13px;padding:5px 10px;margin-bottom:20px;color:#666;border-color:#e0e0e0;" onClick=${onBack}>← Repository</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
+      <h1 style="font-size:20px;font-weight:700;">${test.name}</h1>
+      <${StatusBadge} status=${test.lastRunStatus||'not_run'} />
+    </div>
+    ${sec&&html`<p style="font-size:12px;color:#888;margin-bottom:4px;">Section: ${sec.name}</p>`}
+    <p style="font-size:13px;color:#666;margin-bottom:20px;">${test.description||'No description'}</p>
+    <div style="display:flex;gap:8px;margin-bottom:24px;">
+      <button class="bp" onClick=${onEdit}>Edit steps</button>
+      <button class="bd" onClick=${()=>setConf(true)}>Delete</button>
+    </div>
+    ${conf&&html`<div style="background:#fff8f8;border:1px solid #fcc;border-radius:10px;padding:14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span style="font-size:13px;">Delete permanently?</span>
+      <div style="display:flex;gap:8px;"><button onClick=${()=>setConf(false)}>Cancel</button><button class="bd" onClick=${onDelete}>Delete</button></div>
+    </div>`}
+    <p style="font-size:13px;font-weight:600;margin-bottom:10px;">${test.steps.length} step${test.steps.length!==1?'s':''}</p>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px;">
+      ${test.steps.map((s,i)=>html`<${StepRow} key=${s.id} step=${s} index=${i} />`)}
+    </div>
+    <p style="font-size:12px;color:#aaa;">Created by ${test.createdBy} · last run ${fmtDate(test.lastRunAt)}</p>
+  </div>`;}
+
+// ── Builder ───────────────────────────────────────────────────────────────────
+function BuilderView({test,sections,user,onSave,onCancel}){
+  const[name,setName]=useState(test?.name||'');
+  const[desc,setDesc]=useState(test?.description||'');
+  const[sectionId,setSectionId]=useState(test?.sectionId||'');
+  const[steps,setSteps]=useState(()=>test?.steps||[]);
+  const[ns,setNs]=useState({type:'click',target:'',value:''});
+  const[tab,setTab]=useState('manual');
+  const[prompt,setPrompt]=useState('');
+  const[aiLoad,setAiLoad]=useState(false);
+  const[aiErr,setAiErr]=useState('');
+  const addStep=()=>{if(!ns.target.trim())return;setSteps(s=>[...s,{...ns,id:uid(),delay:0,screenshot:null}]);setNs({type:'click',target:'',value:''});};
+  const removeStep=id=>setSteps(s=>s.filter(x=>x.id!==id));
+  const move=(i,d)=>{const n=[...steps];const j=i+d;if(j<0||j>=n.length)return;[n[i],n[j]]=[n[j],n[i]];setSteps(n);};
+  const setDelay=(id,val)=>setSteps(s=>s.map(x=>x.id===id?{...x,delay:val}:x));
+  const gen=async()=>{if(!prompt.trim())return;setAiLoad(true);setAiErr('');
+    try{const r=await fetch('/api/data');const existing=await r.json();
+      const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:'Generate browser test steps as a JSON array. Each step: type (navigate|click|type|assert|assertText|wait|scroll), target (CSS selector or URL), value (text or empty). Return ONLY a valid JSON array, no markdown.',messages:[{role:'user',content:'Steps for: '+prompt}]})});
+      const d=await res.json();const txt=d.content?.find(c=>c.type==='text')?.text||'';
+      const p=JSON.parse(txt.replace(/```json|```/g,'').trim());
+      if(Array.isArray(p)){setSteps(s=>[...s,...p.map(st=>({...st,id:uid(),delay:0,screenshot:null}))]);setPrompt('');}
+    }catch(e){setAiErr('Could not generate steps.');}setAiLoad(false);};
+  const save=()=>{if(!name.trim()||steps.length===0)return;onSave({id:test?.id||uid(),name:name.trim(),description:desc.trim(),sectionId:sectionId||null,steps,createdBy:test?.createdBy||user,lastRunStatus:test?.lastRunStatus||'not_run',lastRunAt:test?.lastRunAt||null});};
+  return html`<div style="padding:28px 24px;max-width:720px;margin:0 auto;">
+    <button style="font-size:13px;padding:5px 10px;margin-bottom:20px;color:#666;border-color:#e0e0e0;" onClick=${onCancel}>← Cancel</button>
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:22px;">${!test?'New test':'Edit test'}</h1>
+    <div class="card" style="padding:20px;margin-bottom:14px;">
+      <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:5px;">Test name</label>
+      <input style="width:100%;margin-bottom:14px;" value=${name} onInput=${e=>setName(e.target.value)} />
+      <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:5px;">Description</label>
+      <input style="width:100%;margin-bottom:14px;" placeholder="What does this test verify?" value=${desc} onInput=${e=>setDesc(e.target.value)} />
+      <label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:5px;">Section</label>
+      <select style="width:100%;" value=${sectionId} onChange=${e=>setSectionId(e.target.value)}>
+        <option value="">Uncategorised</option>
+        ${sections.map(s=>html`<option value=${s.id}>${s.name}</option>`)}
+      </select>
+    </div>
+    <div class="card" style="padding:20px;margin-bottom:14px;">
+      <div style="display:flex;gap:4px;margin-bottom:16px;">
+        ${['manual','ai'].map(t=>html`<button style="padding:5px 14px;background:${tab===t?'#f0f0f0':'transparent'};font-weight:${tab===t?'600':'400'};" onClick=${()=>setTab(t)}>${t==='manual'?'Manual':'AI generate'}</button>`)}
+      </div>
+      ${tab==='manual'&&html`<div style="display:grid;grid-template-columns:110px 1fr 1fr auto;gap:7px;align-items:center;">
+        <select value=${ns.type} onChange=${e=>setNs(s=>({...s,type:e.target.value}))}>
+          ${STEP_TYPES.map(t=>html`<option value=${t}>${t}</option>`)}
+        </select>
+        <input placeholder="Target / selector" value=${ns.target} onInput=${e=>setNs(s=>({...s,target:e.target.value}))} onKeyDown=${e=>e.key==='Enter'&&addStep()} />
+        <input placeholder="Value (optional)" value=${ns.value} onInput=${e=>setNs(s=>({...s,value:e.target.value}))} onKeyDown=${e=>e.key==='Enter'&&addStep()} />
+        <button class="bp" style="padding:7px 12px;" onClick=${addStep} disabled=${!ns.target.trim()}>+ Add</button>
+      </div>`}
+      ${tab==='ai'&&html`<div>
+        <textarea style="width:100%;height:68px;resize:vertical;margin-bottom:10px;" placeholder="e.g. Log in to WebShip then create a new shipment to London" value=${prompt} onInput=${e=>setPrompt(e.target.value)}></textarea>
+        ${aiErr&&html`<p style="font-size:12px;color:#e24b4a;margin-bottom:8px;">${aiErr}</p>`}
+        <button class="bp" onClick=${gen} disabled=${!prompt.trim()||aiLoad}>${aiLoad?'Generating…':'Generate steps'}</button>
+      </div>`}
+    </div>
+    ${steps.length>0&&html`<div class="card" style="padding:20px;margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <p style="font-size:13px;font-weight:600;">${steps.length} step${steps.length!==1?'s':''}</p>
+        <p style="font-size:12px;color:#aaa;">Click <strong style="font-weight:500;">+ delay</strong> to add a wait before a step</p>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${steps.map((s,i)=>html`<${BuilderStepRow} key=${s.id} step=${s} index=${i} isFirst=${i===0} isLast=${i===steps.length-1} onMove=${move} onRemove=${removeStep} onDelayChange=${setDelay} />`)}
+      </div>
+    </div>`}
+    <div style="display:flex;gap:8px;">
+      <button class="bp" onClick=${save} disabled=${!name.trim()||steps.length===0}>Save test</button>
+      <button style="color:#666;border-color:#e0e0e0;" onClick=${onCancel}>Cancel</button>
+    </div>
+  </div>`;}
+
+// ── Recorder ──────────────────────────────────────────────────────────────────
+function RecorderView({user,sections,onSave}){
+  const[paste,setPaste]=useState('');
+  const[parsed,setParsed]=useState(null);
+  const[testName,setTestName]=useState('');
+  const[sectionId,setSectionId]=useState('');
+  const[error,setError]=useState('');
+  const handlePaste=text=>{setPaste(text);if(!text.trim()){setParsed(null);setError('');return;}
+    try{const data=JSON.parse(text.trim().replace(/^```[\w]*\n?|\n?```$/g,'').trim());
+      if(Array.isArray(data)&&data.length>0){setParsed(data);setError('');if(!testName){const nav=data.find(s=>s.type==='navigate');if(nav){try{setTestName(new URL(nav.target).hostname);}catch(e){}}}}
+      else setError('Expected a JSON array of steps.');
+    }catch(e){setError('Could not parse — click "Copy steps" in the extension panel first.');}};
+  const save=()=>{if(!testName.trim()||!parsed)return;
+    onSave({id:uid(),name:testName.trim(),description:'Recorded from browser',sectionId:sectionId||null,steps:parsed.map(s=>({...s,id:s.id||uid(),delay:s.delay||0})),createdBy:user,lastRunStatus:'not_run',lastRunAt:null});
+    setPaste('');setParsed(null);setTestName('');setSectionId('');};
+  return html`<div style="padding:28px 24px;max-width:700px;margin:0 auto;">
+    <h1 style="font-size:20px;font-weight:700;margin-bottom:4px;">Test recorder</h1>
+    <p style="font-size:13px;color:#666;margin-bottom:28px;">Use the Chrome extension to record on any site, then paste below.</p>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:28px;">
+      ${[['1','Install the Chrome extension','Unzip test-xpress-recorder-extension.zip, go to chrome://extensions, enable Developer mode, click Load unpacked and select the folder.'],
+         ['2','Record on your site','The Test Xpress panel appears top-right on every page. Click ▼ to collapse it, drag it out of the way if needed. Press Start and use your site — it follows you across page navigations.'],
+         ['3','Copy and paste below','Click Stop then Copy N steps →. Come back here, paste, assign a section, and save.']
+      ].map(([n,t,d])=>html`<div class="card" style="padding:18px;">
+        <div style="display:flex;gap:14px;">
+          <div style="width:26px;height:26px;min-width:26px;background:#1a1a2e;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;">${n}</div>
+          <div><p style="font-size:14px;font-weight:600;margin-bottom:4px;">${t}</p><p style="font-size:13px;color:#666;">${d}</p></div>
+        </div>
+      </div>`)}
+    </div>
+    <div class="card" style="padding:22px;">
+      <p style="font-size:14px;font-weight:600;margin-bottom:12px;">Paste recorded steps</p>
+      <textarea style="width:100%;height:100px;resize:vertical;font-family:monospace;font-size:12px;background:#f8f8f8;margin-bottom:${error?'8px':'14px'};" placeholder="Paste JSON here…" value=${paste} onInput=${e=>handlePaste(e.target.value)}></textarea>
+      ${error&&html`<p style="font-size:12px;color:#e24b4a;margin-bottom:12px;">${error}</p>`}
+      ${parsed&&html`<div>
+        <div style="background:#f8f8f8;border:1px solid #e8e8e8;border-radius:8px;padding:14px;margin-bottom:14px;">
+          <p style="font-size:12px;font-weight:600;color:#3b6d11;margin-bottom:10px;">✓ ${parsed.length} steps ready</p>
+          <div style="display:flex;flex-direction:column;gap:5px;max-height:200px;overflow-y:auto;">
+            ${parsed.map((s,i)=>html`<${StepRow} key=${i} step=${s} index=${i} />`)}
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+          <div style="flex:1;min-width:180px;"><label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:5px;">Test name</label>
+            <input style="width:100%;" placeholder="Name this test" value=${testName} onInput=${e=>setTestName(e.target.value)} /></div>
+          <div style="min-width:150px;"><label style="display:block;font-size:12px;font-weight:600;color:#555;margin-bottom:5px;">Section</label>
+            <select style="width:100%;" value=${sectionId} onChange=${e=>setSectionId(e.target.value)}>
+              <option value="">Uncategorised</option>
+              ${sections.map(s=>html`<option value=${s.id}>${s.name}</option>`)}
+            </select></div>
+          <button class="bp" style="padding:8px 20px;" onClick=${save} disabled=${!testName.trim()}>Save test</button>
+        </div>
+      </div>`}
+    </div>
+  </div>`;}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App(){
+  const[loading,setLoading]=useState(true);
+  const[loadErr,setLoadErr]=useState('');
+  const[user,setUser]=useState(null);
+  const[nav,setNav]=useState('repository');
+  const[subView,setSubView]=useState(null);
+  const[tests,setTests]=useState([]);
+  const[sections,setSections]=useState([]);
+  const[runs,setRuns]=useState([]);
+  const[saveStatus,setSaveStatus]=useState('');
+  const saveTimer=useRef(null);
+
+  useEffect(()=>{
+    apiLoad().then(d=>{setTests(normalise(d.tests));setSections(d.sections||[]);setRuns(d.runs||[]);setLoading(false);})
+      .catch(()=>{setLoadErr('Could not connect to server.');setLoading(false);});
+  },[]);
+
+  const persist=useCallback((t,s,r)=>{
+    setSaveStatus('saving');clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{
+      apiSave(t,s,r).then(()=>{setSaveStatus('saved');setTimeout(()=>setSaveStatus(''),2500);})
+        .catch(()=>{setSaveStatus('error');setTimeout(()=>setSaveStatus(''),4000);});
+    },400);
+  },[]);
+
+  const persistTests=t=>{setTests(t);persist(t,sections,runs);};
+  const persistSections=s=>{setSections(s);persist(tests,s,runs);};
+  const persistRuns=r=>{setRuns(r);persist(tests,sections,r);};
+
+  const saveTest=t=>{persistTests(tests.find(x=>x.id===t.id)?tests.map(x=>x.id===t.id?t:x):[...tests,t]);setSubView(null);};
+  const deleteTest=id=>{persistTests(tests.filter(t=>t.id!==id));setSubView(null);};
+  const saveRun=run=>{const r=[...runs,run];persistRuns(r);setSubView({type:'runDetail',id:run.id});};
+  const deleteRun=id=>{persistRuns(runs.filter(r=>r.id!==id));setSubView(null);};
+  const updateRun=(id,status,results)=>persistRuns(runs.map(r=>r.id===id?{...r,status,results,lastRunAt:new Date().toISOString()}:r));
+  const goNav=v=>{setNav(v);setSubView(null);};
+
+  if(loading)return html`<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;"><div style="text-align:center;color:#888;"><div style="width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#1a1a2e;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px;"></div><p style="font-size:14px;">Loading…</p></div></div>`;
+  if(loadErr)return html`<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;padding:40px;"><div style="text-align:center;max-width:360px;"><p style="font-size:16px;font-weight:600;margin-bottom:8px;">Connection error</p><p style="font-size:14px;color:#888;margin-bottom:20px;">${loadErr}</p><button class="bp" onClick=${()=>window.location.reload()}>Retry</button></div></div>`;
+  if(!user)return html`<${LoginView} onLogin=${u=>setUser(u)} />`;
+
+  const curTest=tests.find(t=>t.id===subView?.id);
+  const curRun=runs.find(r=>r.id===subView?.id);
+  const activeNav=subView?.type==='newRun'||subView?.type==='runDetail'?'runs':nav;
+
+  let content;
+  if(subView?.type==='builder') content=html`<${BuilderView} test=${curTest||null} sections=${sections} user=${user} onSave=${saveTest} onCancel=${()=>setSubView(null)} />`;
+  else if(subView?.type==='testDetail'&&curTest) content=html`<${TestDetailView} test=${curTest} sections=${sections} onBack=${()=>setSubView(null)} onEdit=${()=>setSubView({type:'builder',id:curTest.id})} onDelete=${()=>deleteTest(curTest.id)} />`;
+  else if(subView?.type==='newRun') content=html`<${NewRunView} tests=${tests} sections=${sections} user=${user} onSave=${saveRun} onCancel=${()=>setSubView(null)} />`;
+  else if(subView?.type==='runDetail'&&curRun) content=html`<${RunDetailView} run=${curRun} tests=${tests} onBack=${()=>setSubView(null)} onUpdateRun=${(s,r)=>updateRun(curRun.id,s,r)} onDeleteRun=${()=>deleteRun(curRun.id)} />`;
+  else if(nav==='repository') content=html`<${RepositoryView} tests=${tests} sections=${sections} onTests=${persistTests} onSections=${persistSections} onEdit=${id=>setSubView({type:'builder',id})} onView=${id=>setSubView({type:'testDetail',id})} onNew=${()=>setSubView({type:'builder',id:null})} />`;
+  else if(nav==='runs') content=html`<${RunsView} runs=${runs} onNewRun=${()=>setSubView({type:'newRun'})} onRunDetail=${id=>setSubView({type:'runDetail',id})} />`;
+  else if(nav==='recorder') content=html`<${RecorderView} user=${user} sections=${sections} onSave=${t=>{saveTest(t);goNav('repository');}} />`;
+
+  return html`<div>
+    <${TopNav} user=${user} view=${activeNav} onView=${goNav} onLogout=${()=>setUser(null)} saveStatus=${saveStatus} />
+    <div style="animation:fadeIn 0.15s ease;">${content}</div>
+  </div>`;}
+
+render(html`<${App}/>`,document.getElementById('app'));
+</script>
+</body>
+</html>
